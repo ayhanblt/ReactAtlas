@@ -1,4 +1,4 @@
-import { streamText } from 'ai';
+import { streamText, StreamData, StreamingTextResponse } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { pinecone, indexName } from '@/lib/pinecone';
 
@@ -28,6 +28,7 @@ export async function POST(req: Request) {
     const queryEmbedding = embedData.embedding?.values;
 
     let contextText = '';
+    const ragSources: any[] = [];
 
     if (queryEmbedding) {
       // 2. Vektör ile Pinecone üzerinde arama yap (Retrieval)
@@ -40,7 +41,16 @@ export async function POST(req: Request) {
       });
 
       // 3. Gelen bağlamları (context) birleştir
-      const contexts = queryResponse.matches.map(match => match.metadata?.text || '');
+      const contexts = queryResponse.matches.map((match, i) => {
+        const url = match.metadata?.url || 'https://react.dev/reference/react';
+        const title = match.metadata?.title || `Doküman ${i + 1}`;
+        ragSources.push({
+          url,
+          text: match.metadata?.text || '',
+          title
+        });
+        return `KAYNAK [${title}](${url}):\n${match.metadata?.text || ''}`;
+      });
       contextText = contexts.join('\n\n---\n\n');
     }
 
@@ -50,18 +60,31 @@ export async function POST(req: Request) {
     Aşağıda sağlanan "Bağlam (Context)" bilgisini kullanarak kullanıcının sorusuna cevap ver. 
     Eğer cevap bağlamın içinde yoksa, "Bununla ilgili sağlanan dokümanlarda bir bilgi bulamadım" de.
     
+    ÖNEMLİ KURALLAR:
+    1. Cevabının SONUNA "Kaynaklar:" veya "Dokümanlar:" şeklinde bir liste KESİNLİKLE EKLEME.
+    2. Atıfları SADECE cümle içinde, bilginin geçtiği yerde Markdown Link formatında yap. 
+    Örnek Doğru Kullanım: JSX aslında JavaScript kodudur [[Doküman 1](URL)].
+    Örnek Yanlış Kullanım: Kaynak: Doküman 1
+    
     Bağlam:
     ${contextText}
     `;
+
+    // Initialize StreamData
+    const data = new StreamData();
+    data.append({ sources: ragSources });
 
     // 5. LLM ile cevap üret ve stream et
     const result = await streamText({
       model: groq(process.env.CHAT_MODEL || 'llama-3.1-8b-instant'),
       system: systemPrompt,
       messages,
+      onFinish() {
+        data.close();
+      }
     });
 
-    return result.toAIStreamResponse();
+    return new StreamingTextResponse(result.toAIStream(), {}, data);
   } catch (error) {
     console.error('API Chat Error:', error);
     return new Response('Internal Server Error', { status: 500 });
